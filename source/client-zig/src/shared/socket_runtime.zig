@@ -23,6 +23,7 @@ pub fn Runtime(comptime Profile: type) type {
         pub const WSARecvFromFn = *const fn (c.SOCKET, c.LPWSABUF, c.DWORD, c.LPDWORD, c.LPDWORD, *c.sockaddr, *c_int, c.LPWSAOVERLAPPED, c.LPWSAOVERLAPPED_COMPLETION_ROUTINE) callconv(.winapi) c_int;
         pub const WSAGetOverlappedResultFn = *const fn (c.SOCKET, c.LPWSAOVERLAPPED, c.LPDWORD, c.BOOL, c.LPDWORD) callconv(.winapi) c.BOOL;
         pub const WSAGetLastErrorFn = *const fn () callconv(.winapi) c_int;
+        pub const ShutdownFn = *const fn (c.SOCKET, c_int) callconv(.winapi) c_int;
         pub const GetProcAddressFn = *const fn (c.HMODULE, c.LPCSTR) callconv(.winapi) c.FARPROC;
 
         const Peer = struct { socket: c.SOCKET = c.INVALID_SOCKET, address: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in) };
@@ -54,6 +55,7 @@ pub fn Runtime(comptime Profile: type) type {
         var real_wsa_recvfrom: ?WSARecvFromFn = null;
         var real_wsa_get_overlapped_result: ?WSAGetOverlappedResultFn = null;
         var real_wsa_get_last_error: ?WSAGetLastErrorFn = null;
+        var real_shutdown: ?ShutdownFn = null;
         var real_get_proc: ?GetProcAddressFn = null;
 
         fn peerSet(socket: c.SOCKET, address: *const c.sockaddr_in) void {
@@ -185,6 +187,7 @@ pub fn Runtime(comptime Profile: type) type {
             real_wsa_recvfrom = win.proc(WSARecvFromFn, ws, "WSARecvFrom");
             real_wsa_get_overlapped_result = win.proc(WSAGetOverlappedResultFn, ws, "WSAGetOverlappedResult");
             real_wsa_get_last_error = win.proc(WSAGetLastErrorFn, ws, "WSAGetLastError");
+            real_shutdown = win.proc(ShutdownFn, ws, "shutdown");
             return real_connect != null and real_bind != null and real_sendto != null and real_recvfrom != null;
         }
 
@@ -257,25 +260,33 @@ pub fn Runtime(comptime Profile: type) type {
 
         /// A rebuilt frame goes out WHOLE before the game is told its own
         /// frame was sent: the game tracks offsets into ITS buffer, so a short
-        /// send cannot be handed back to it. Nothing sent yet and an error
-        /// (WSAEWOULDBLOCK on a non-blocking socket, …): false, with the real
-        /// error left in place, so the game sends its frame again and it is
-        /// rebuilt again. Part sent: the rest follows, waiting out
-        /// WSAEWOULDBLOCK for up to ~2 s; any other error ends the attempt
-        /// (the connection is broken mid-frame either way).
+        /// send cannot be handed back to it.
+        /// - Nothing sent yet and an error (WSAEWOULDBLOCK on a non-blocking
+        ///   socket, …): false, with the real error left in place, so the game
+        ///   sends its frame again and it is rebuilt again. Nothing is on the
+        ///   wire, so that retry is clean.
+        /// - Part sent: the rest follows, waiting out WSAEWOULDBLOCK for up to
+        ///   ~2 s. If it still cannot finish, the connection is SHUT DOWN
+        ///   (both ways) before false: a retry from byte zero would put a
+        ///   second frame after the first one's prefix, so the game must see
+        ///   a dead connection (its next send fails) and reconnect instead.
         fn sendWhole(function: SendFn, socket: c.SOCKET, frame: []const u8, flags: c_int) bool {
             const would_block: c_int = 10035; // WSAEWOULDBLOCK
+            const sd_both: c_int = 2; // SD_BOTH
             var offset: usize = 0;
             var waits: u32 = 0;
             while (offset < frame.len) {
                 const sent = function(socket, frame.ptr + offset, @intCast(frame.len - offset), flags);
                 if (sent == c.SOCKET_ERROR or sent < 0) {
                     if (offset == 0) return false;
-                    const get_error = real_wsa_get_last_error orelse return false;
-                    if (get_error() != would_block or waits >= 2000) return false;
-                    waits += 1;
-                    win.Sleep(1);
-                    continue;
+                    const blocked = if (real_wsa_get_last_error) |get_error| get_error() == would_block else false;
+                    if (blocked and waits < 2000) {
+                        waits += 1;
+                        win.Sleep(1);
+                        continue;
+                    }
+                    if (real_shutdown) |shut| _ = shut(socket, sd_both);
+                    return false;
                 }
                 offset += @intCast(sent);
             }
