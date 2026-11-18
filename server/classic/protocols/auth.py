@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from hashlib import md5
 from threading import RLock
@@ -13,6 +14,7 @@ from classic.accounts.credentials import (
     CredentialStore,
 )
 from classic.accounts.identity import Identity, IdentityStore
+from classic.exa_ticket import looks_like_ticket, verify_ticket
 
 from .frame import ClassicEAFrame
 from .password import password_candidates, storage_password_candidate
@@ -152,6 +154,7 @@ class ClassicAuthService:
         auto_enroll: bool = False,
         allow_create: bool = True,
         allow_password_reset: bool = False,
+        ticket_secret: bytes | None = None,
     ) -> None:
         self.credentials = credentials
         self.identities = identities
@@ -161,6 +164,8 @@ class ClassicAuthService:
         self.auto_enroll = bool(auto_enroll)
         self.allow_create = bool(allow_create)
         self.allow_password_reset = bool(allow_password_reset)
+        # ExA Cup automatic login (classic/exa_ticket.py); None = off.
+        self.ticket_secret = ticket_secret
 
     @staticmethod
     def _upper_fields(fields: Mapping[str, object]) -> dict[str, str]:
@@ -185,9 +190,42 @@ class ClassicAuthService:
                 return value
         return fallback
 
+    def _ticket_login(self, token: str) -> AuthenticationResult:
+        """ExA Cup automatic login: the ticket names the account; the first
+        use creates it with a random password nobody knows. A ticket that does
+        not verify is refused outright (never treated as a password, so it can
+        never enroll an account either)."""
+        if not self.ticket_secret:
+            return AuthenticationResult(False, "ticket_off")
+        ticket = verify_ticket(token, self.ticket_secret)
+        if ticket is None:
+            return AuthenticationResult(False, "ticket_invalid")
+        account = self._resolve_account(ticket.account_name)
+        if account is None:
+            for persona in (ticket.persona, *ticket.fallback_personas()):
+                try:
+                    account = self.credentials.create_account(
+                        ticket.account_name,
+                        secrets.token_urlsafe(32),
+                        persona=persona,
+                        personas=(persona,),
+                    )
+                    break
+                except ValueError:
+                    account = self._resolve_account(ticket.account_name)
+                    if account is not None:  # created meanwhile by a retry
+                        break
+            if account is None:
+                return AuthenticationResult(False, "ticket_persona_taken")
+        if account.banned or self.credentials.is_email_blocked(account.email):
+            return AuthenticationResult(False, "banned")
+        if not account.enabled:
+            return AuthenticationResult(False, "disabled")
+        return AuthenticationResult(True, "exa_ticket", account.account_name, account.persona)
+
     @staticmethod
     def _auth_error(reason: str) -> int:
-        if reason in {"missing_password", "bad_password"}:
+        if reason in {"missing_password", "bad_password", "ticket_invalid", "ticket_off"}:
             return ERROR_PASS
         if reason == "account_in_use":
             return ERROR_LOGN
@@ -357,8 +395,12 @@ class ClassicAuthService:
             supplied,
             fixed_mask=context.mask or self.profile.fixed_mask,
         )
+        # ExA Cup automatic login: the plugin puts the ticket in PASS as is.
+        ticket = next((c for c in (supplied, *candidates) if looks_like_ticket(c)), None)
 
-        if self.verify_passwords:
+        if ticket is not None:
+            result = self._ticket_login(ticket)
+        elif self.verify_passwords:
             result = self.credentials.authenticate_candidates(identifier, candidates)
             if (
                 not result.accepted
