@@ -255,6 +255,33 @@ pub fn Runtime(comptime Profile: type) type {
             return Profile.sendUdp(socket, data, length, flags, &peer, function);
         }
 
+        /// A rebuilt frame goes out WHOLE before the game is told its own
+        /// frame was sent: the game tracks offsets into ITS buffer, so a short
+        /// send cannot be handed back to it. Nothing sent yet and an error
+        /// (WSAEWOULDBLOCK on a non-blocking socket, …): false, with the real
+        /// error left in place, so the game sends its frame again and it is
+        /// rebuilt again. Part sent: the rest follows, waiting out
+        /// WSAEWOULDBLOCK for up to ~2 s; any other error ends the attempt
+        /// (the connection is broken mid-frame either way).
+        fn sendWhole(function: SendFn, socket: c.SOCKET, frame: []const u8, flags: c_int) bool {
+            const would_block: c_int = 10035; // WSAEWOULDBLOCK
+            var offset: usize = 0;
+            var waits: u32 = 0;
+            while (offset < frame.len) {
+                const sent = function(socket, frame.ptr + offset, @intCast(frame.len - offset), flags);
+                if (sent == c.SOCKET_ERROR or sent < 0) {
+                    if (offset == 0) return false;
+                    const get_error = real_wsa_get_last_error orelse return false;
+                    if (get_error() != would_block or waits >= 2000) return false;
+                    waits += 1;
+                    win.Sleep(1);
+                    continue;
+                }
+                offset += @intCast(sent);
+            }
+            return true;
+        }
+
         fn mySend(socket: c.SOCKET, data: [*]const u8, length: c_int, flags: c_int) callconv(.winapi) c_int {
             const function = real_send orelse return c.SOCKET_ERROR;
             if (length <= 0) return function(socket, data, length, flags);
@@ -265,9 +292,7 @@ pub fn Runtime(comptime Profile: type) type {
                 if (@hasDecl(Profile, "tcpSend")) {
                     var rebuilt: [1024]u8 = undefined;
                     if (Profile.tcpSend(data[0..@intCast(length)], rebuilt[0..])) |frame| {
-                        const sent = function(socket, frame.ptr, @intCast(frame.len), flags);
-                        if (sent == c.SOCKET_ERROR) return c.SOCKET_ERROR;
-                        return length;
+                        return if (sendWhole(function, socket, frame, flags)) length else c.SOCKET_ERROR;
                     }
                 }
                 return function(socket, data, length, flags);
