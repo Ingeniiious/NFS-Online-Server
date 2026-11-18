@@ -6,8 +6,18 @@ const logger = @import("shared").logger;
 const relay_wire = @import("shared").relay_wire;
 const udp_trace = @import("shared").udp_trace;
 const state = @import("state.zig");
+const autologin = @import("autologin.zig");
 const c = win.c;
 const game_udp_port: u16 = 3658;
+
+/// ExA Cup automatic login: the game's `auth` with the launcher's account in
+/// it (autologin.zig), or null to send the bytes as they are.
+pub fn tcpSend(data: []const u8, out: []u8) ?[]const u8 {
+    if (!state.network_enabled) return null;
+    const rewritten = autologin.rewriteAuth(data, state.accountName(), state.accountTicket(), out) orelse return null;
+    logger.line("MW auto-login: auth sent as {s}", .{state.accountName()});
+    return rewritten;
+}
 
 pub fn relayAddress() c.sockaddr_in {
     return state.race_addr;

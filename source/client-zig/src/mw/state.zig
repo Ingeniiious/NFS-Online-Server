@@ -2,6 +2,7 @@ const std = @import("std");
 const win = @import("shared").win;
 const net = @import("shared").net_util;
 const strings = @import("shared").strings;
+const autologin = @import("autologin.zig");
 const c = win.c;
 
 pub var self_module: c.HMODULE = null;
@@ -37,6 +38,17 @@ pub var server_name: [32]u8 = blk: {
     break :blk x;
 };
 pub var server_racers: u32 = 1;
+// ExA Cup automatic login (autologin.zig): written by the ExA Cup launcher.
+pub var account_name: [16]u8 = [_]u8{0} ** 16;
+pub var account_ticket: [600]u8 = [_]u8{0} ** 600;
+
+pub fn accountName() []const u8 {
+    return std.mem.sliceTo(&account_name, 0);
+}
+
+pub fn accountTicket() []const u8 {
+    return std.mem.sliceTo(&account_ticket, 0);
+}
 
 pub fn refreshAddresses() void {
     _ = net.resolve(&bootstrap, &bootstrap_addr);
@@ -125,6 +137,13 @@ pub fn applyConfig(_: void, section: []const u8, key: []const u8, value: []const
             if (strings.parseBool(value)) |v| log_enabled = v;
         } else if (strings.eqlIgnoreCase(key, "udp_trace")) {
             if (strings.parseBool(value)) |v| udp_trace = v;
+        }
+    } else if (strings.eqlIgnoreCase(section, "account")) {
+        // A value with anything unsafe is ignored: no automatic login.
+        if (strings.eqlIgnoreCase(key, "name")) {
+            if (autologin.validValue(value, account_name.len - 1)) strings.copyZ(account_name[0..], value);
+        } else if (strings.eqlIgnoreCase(key, "ticket")) {
+            if (autologin.validValue(value, account_ticket.len - 1)) strings.copyZ(account_ticket[0..], value);
         }
     }
 }

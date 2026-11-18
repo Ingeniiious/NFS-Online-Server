@@ -257,7 +257,21 @@ pub fn Runtime(comptime Profile: type) type {
 
         fn mySend(socket: c.SOCKET, data: [*]const u8, length: c_int, flags: c_int) callconv(.winapi) c_int {
             const function = real_send orelse return c.SOCKET_ERROR;
-            if (!net.isSocketType(socket, c.SOCK_DGRAM) or length <= 0) return function(socket, data, length, flags);
+            if (length <= 0) return function(socket, data, length, flags);
+            if (!net.isSocketType(socket, c.SOCK_DGRAM)) {
+                // ExA Cup: a profile may rebuild one whole TCP frame (MW's
+                // automatic login, mw/autologin.zig). The game is told its own
+                // bytes went, since the frame it wrote is the one it accounts for.
+                if (@hasDecl(Profile, "tcpSend")) {
+                    var rebuilt: [1024]u8 = undefined;
+                    if (Profile.tcpSend(data[0..@intCast(length)], rebuilt[0..])) |frame| {
+                        const sent = function(socket, frame.ptr, @intCast(frame.len), flags);
+                        if (sent == c.SOCKET_ERROR) return c.SOCKET_ERROR;
+                        return length;
+                    }
+                }
+                return function(socket, data, length, flags);
+            }
             var peer: c.sockaddr_in = undefined;
             if (!peerGet(socket, &peer)) return function(socket, data, length, flags);
             const sendto_function = real_sendto orelse return function(socket, data, length, flags);
