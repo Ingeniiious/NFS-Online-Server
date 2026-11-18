@@ -32,6 +32,15 @@ def make_ticket(user_id: str, persona: str, expiry: int, secret: bytes = SECRET)
 
 
 class TicketVerifyTests(unittest.TestCase):
+    def test_the_api_vector_verifies(self) -> None:
+        """The exact ticket the ExA Cup api's test signs (apps/api/src/lib/nfsmw.test.ts)."""
+        vector = (
+            "exa1.eyJ1IjoidXNlci0xIiwicCI6IlJhY2VyXzAxIiwiZSI6MTgwMDAwMDAwMH0"
+            ".q9jLCPTdRQhqolal-6L_pl5cT2wnIAT8rl3aZ4Uglhk"
+        )
+        self.assertEqual(verify_ticket(vector, SECRET, now=1_800_000_000 - 1), ExaTicket("user-1", "Racer_01"))
+        self.assertIsNone(verify_ticket(vector, SECRET, now=1_800_000_001))
+
     def test_a_good_ticket_names_its_account(self) -> None:
         later = int(time.time()) + 600
         ticket = verify_ticket(make_ticket("user-1", "Racer_01", later), SECRET)
