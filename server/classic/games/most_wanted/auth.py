@@ -35,7 +35,12 @@ def create_auth_service(
     active_sessions: ClassicActiveSessionRegistry | None = None,
     verify_passwords: bool = True,
     auto_enroll: bool = False,
-    allow_create: bool = True,
+    # ExA Cup hardening: off. Upstream left in-game `acct` on whatever the
+    # config said, so anyone could create unlimited accounts, and `acct` on an
+    # existing name answered whether a password was right without counting
+    # the failure (a password oracle past AUTH_FAILURE_LIMIT). Accounts come
+    # from the operator (the CLI, or ExA Cup's account bridge).
+    allow_create: bool = False,
     allow_password_reset: bool = False,
 ) -> ClassicAuthService:
     return ClassicAuthService(

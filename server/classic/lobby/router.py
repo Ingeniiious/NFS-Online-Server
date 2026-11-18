@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from classic.lobby.models import ClassicPreloginContext, ClassicPreloginReply
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from classic.protocols.frame import ClassicEAFrame
@@ -19,8 +22,93 @@ def _wire_types():
     return ClassicEAFrame, ClassicEAShortFrame
 
 
+def _peer_ip(context: ClassicPreloginContext) -> str:
+    return context.auth.client_ip or context.client_address
+
+
+def _logged_in(context: ClassicPreloginContext) -> bool:
+    return context.authenticated or context.auth.account is not None
+
+
+def _speaks_for(caller: ClassicPreloginContext, player: ClassicPreloginContext) -> str | None:
+    """"own": CALLER is PLAYER's own connection. "side": a socket that never
+    logged in, from PLAYER's IP (the stock client's shared callback socket, as
+    upstream's tests model it). None: neither.
+
+    KNOWN LIMIT (docs/NFS-ONLINE.md §7): "side" trusts the IP alone, so a
+    stranger behind the same NAT / carrier NAT could pass it. Every "side" use
+    is logged; the private test shows whether the real client ever needs it,
+    and it is removed or bound to a server-issued session before public play.
+    """
+    if caller is player:
+        return "own"
+    caller_ip = _peer_ip(caller)
+    if not _logged_in(caller) and bool(caller_ip) and caller_ip == _peer_ip(player):
+        return "side"
+    return None
+
+
+# What the host of a race may do in a guest's name: admit them, and let them
+# go (the stock client's GJOI callback; tests/test_mw_race_lifecycle.py). Never
+# chat, ranking, or a guest's account and personas.
+_MW_HOST_FOR_GUEST = frozenset({"gjoi", "glea"})
+
+
+def _mw_callback_route(
+    caller: ClassicPreloginContext,
+    target: ClassicPreloginContext,
+    race_host: ClassicPreloginContext | None = None,
+    command: str = "",
+) -> str | None:
+    """Why CALLER may act as TARGET: "own" | "side" | "host" | "host-side",
+    or None when it may not (`_mw_callback_allowed`)."""
+    route = _speaks_for(caller, target)
+    if route is not None:
+        return route
+    if race_host is None or command.casefold() not in _MW_HOST_FOR_GUEST:
+        return None
+    host_route = _speaks_for(caller, race_host)
+    return None if host_route is None else ("host" if host_route == "own" else "host-side")
+
+
+def _mw_callback_allowed(
+    caller: ClassicPreloginContext,
+    target: ClassicPreloginContext,
+    race_host: ClassicPreloginContext | None = None,
+    command: str = "",
+) -> bool:
+    """ExA Cup hardening: may this socket run a callback as TARGET?
+
+    The stock MW client sends some commands in uppercase, and the server runs
+    them as the player that CALLUSER or NAME names: the player's own side
+    socket (GSTA), and the race HOST admitting a guest into its game (GJOI).
+    Upstream accepted that from ANY socket, so a stranger could chat, report
+    race results, or create and delete personas as any online player. Now only
+    the player may, and the host of the race the player is in or joining
+    (RACE_HOST) only for _MW_HOST_FOR_GUEST; a stranger, or another logged-in
+    player, never may.
+    """
+    return _mw_callback_route(caller, target, race_host, command) is not None
+
+
 class ClassicRouterMixin:
     """Route decoded EA frames to title- and domain-specific handlers."""
+
+    def _mw_race_host_context(
+        self,
+        player: ClassicPreloginContext,
+    ) -> ClassicPreloginContext | None:
+        """The logged-in connection of the host of the race PLAYER is in or
+        joining, when there is one (ExA Cup hardening, `_mw_callback_allowed`)."""
+        for game_id in (player.lobby_game_id, player.mw_join_pending_game_id):
+            game = self.sessions.get_game(game_id) if game_id else None
+            if game is None:
+                continue
+            with self._connections_lock:
+                host = self._connections.get(game.owner_id)
+            if host is not None:
+                return host
+        return None
 
     def dispatch(
         self,
@@ -39,7 +127,27 @@ class ClassicRouterMixin:
         mw_callback = False
         if self._is_most_wanted and (packet.command.isupper() or packet.reserved):
             callback_context = self._mw_context_for_callback(fields)
-            if callback_context is not None:
+            route = (
+                _mw_callback_route(
+                    request_context,
+                    callback_context,
+                    self._mw_race_host_context(callback_context),
+                    command,
+                )
+                if callback_context is not None
+                else None
+            )
+            if callback_context is not None and route != "own":
+                # Evidence for docs/NFS-ONLINE.md §7: which callbacks the real
+                # client sends from where (a refused one included).
+                _log.info(
+                    "mw callback cmd=%s route=%s from=%s target=%s",
+                    packet.command,
+                    route or "refused",
+                    _peer_ip(request_context) or "-",
+                    callback_context.auth.persona or "-",
+                )
+            if route is not None:
                 context = callback_context
                 mw_callback = context is not request_context
 
