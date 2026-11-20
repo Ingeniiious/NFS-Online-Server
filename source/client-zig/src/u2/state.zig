@@ -2,6 +2,7 @@ const std = @import("std");
 const win = @import("shared").win;
 const net = @import("shared").net_util;
 const strings = @import("shared").strings;
+const autologin = @import("autologin.zig");
 const c = win.c;
 
 pub var self_module: c.HMODULE = null;
@@ -27,12 +28,24 @@ pub var lan_addr: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in);
 pub var lan_control_addr: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in);
 pub var lan_control_alias_addr: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in);
 
+// ExA Cup automatic login (autologin.zig): written by the ExA Cup launcher.
+pub var account_name: [16]u8 = [_]u8{0} ** 16;
+pub var account_ticket: [600]u8 = [_]u8{0} ** 600;
+
 pub var network_enabled = true;
 pub var lan_enabled = true;
 pub var inject_server = true;
 pub var patches_enabled = true;
 pub var log_enabled = true;
 pub var udp_trace = false;
+
+pub fn accountName() []const u8 {
+    return std.mem.sliceTo(&account_name, 0);
+}
+
+pub fn accountTicket() []const u8 {
+    return std.mem.sliceTo(&account_ticket, 0);
+}
 
 pub fn refreshAddresses() void {
     _ = net.resolve(&bootstrap, &bootstrap_addr);
@@ -107,6 +120,13 @@ pub fn applyConfig(_: void, section: []const u8, key: []const u8, value: []const
     } else if (strings.eqlIgnoreCase(section, "patches")) {
         if (strings.eqlIgnoreCase(key, "enabled")) {
             if (strings.parseBool(value)) |v| patches_enabled = v;
+        }
+    } else if (strings.eqlIgnoreCase(section, "account")) {
+        // A value with anything unsafe is ignored: no automatic login.
+        if (strings.eqlIgnoreCase(key, "name")) {
+            if (autologin.validValue(value, account_name.len - 1)) strings.copyZ(account_name[0..], value);
+        } else if (strings.eqlIgnoreCase(key, "ticket")) {
+            if (autologin.validValue(value, account_ticket.len - 1)) strings.copyZ(account_ticket[0..], value);
         }
     } else if (strings.eqlIgnoreCase(section, "logging")) {
         if (strings.eqlIgnoreCase(key, "enabled")) {
