@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from classic.accounts.credentials import CredentialStore
 from classic.accounts.identity import IdentityStore
+from classic.exa_ticket import secret_from_env
 from classic.protocols.auth import (
     ClassicActiveSessionRegistry,
     ClassicAuthProfile,
     ClassicAuthService,
 )
+
+_FROM_ENV = object()
 
 
 UNDERGROUND2_AUTH_PROFILE = ClassicAuthProfile(
@@ -31,8 +34,10 @@ def create_auth_service(
     active_sessions: ClassicActiveSessionRegistry | None = None,
     verify_passwords: bool = True,
     auto_enroll: bool = False,
-    allow_create: bool = True,
+    allow_create: bool = False,
     allow_password_reset: bool = False,
+    # ExA Cup automatic login: EXA_LOGIN_SECRET unless a test passes its own.
+    ticket_secret: bytes | None | object = _FROM_ENV,
 ) -> ClassicAuthService:
     return ClassicAuthService(
         credentials,
@@ -43,4 +48,5 @@ def create_auth_service(
         auto_enroll=auto_enroll,
         allow_create=allow_create,
         allow_password_reset=allow_password_reset,
+        ticket_secret=secret_from_env() if ticket_secret is _FROM_ENV else ticket_secret,  # type: ignore[arg-type]
     )

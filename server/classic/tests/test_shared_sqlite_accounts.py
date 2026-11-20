@@ -26,10 +26,13 @@ class SharedSQLiteAccountTests(unittest.TestCase):
                 server_id="u2-test",
                 lease_seconds=30,
             )
+            # In-game acct is off in the ExA deployment (patch 0008); the
+            # upstream creation-then-auth behaviors are tested with creation on.
             service = create_u2_auth_service(
                 credentials,
                 identities,
                 active_sessions=sessions,
+                allow_create=True,
             )
             context = ClassicAuthContext(
                 connection_id="u2-create-then-auth",

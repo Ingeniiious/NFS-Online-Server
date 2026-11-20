@@ -206,10 +206,13 @@ class Underground2AuthServiceTests(unittest.TestCase):
         )
         self.identities = IdentityStore(token_factory=lambda: "classic-session-token.")
         self.active = ClassicActiveSessionRegistry()
+        # In-game acct is off in the ExA deployment (patch 0008); the
+        # upstream creation behaviors are tested with creation on.
         self.service = create_u2_auth_service(
             self.credentials,
             self.identities,
             active_sessions=self.active,
+            allow_create=True,
         )
 
     def _context(self, connection_id: str) -> ClassicAuthContext:

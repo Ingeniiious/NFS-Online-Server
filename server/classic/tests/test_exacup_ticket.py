@@ -15,6 +15,8 @@ from classic.accounts.identity import IdentityStore
 from classic.accounts.sqlite_backend import SQLiteCredentialStore, SQLiteIdentityStore
 from classic.exa_ticket import ExaTicket, verify_ticket
 from classic.games.most_wanted.auth import create_auth_service as create_mw_auth_service
+from classic.games.underground2.auth import create_auth_service as create_u2_auth_service
+from classic.protocols.password import make_password_token
 from classic.protocols.auth import ClassicActiveSessionRegistry, ClassicAuthContext
 
 SECRET = b"s" * 48
@@ -139,3 +141,59 @@ class TicketLoginTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Underground2TicketTests(unittest.TestCase):
+    """The UG2 factory wires the same shared ticket backend (the server half of
+    docs/NFS-ONLINE.md's U2 automatic login). The stock U2 client encodes what
+    the player typed with the session mask; the ticket still lands, decoded."""
+
+    def setUp(self) -> None:
+        self._dir = TemporaryDirectory()
+        root = Path(self._dir.name)
+        database = SQLiteAccountDatabase(root / "accounts.sqlite3", root / "users")
+        self.credentials = SQLiteCredentialStore(database)
+        self.service = create_u2_auth_service(
+            self.credentials,
+            SQLiteIdentityStore(database, token_factory=lambda: "classic-session-token."),
+            active_sessions=ClassicActiveSessionRegistry(),
+            auto_enroll=True,  # tickets must never use it
+            ticket_secret=SECRET,
+        )
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _login(self, password: str, conn: str = "c1") -> object:
+        return self.service.login(
+            {"NAME": "anything", "PASS": password, "PSES": "Public Key"},
+            ClassicAuthContext(connection_id=conn, client_ip="203.0.113.9", mask="Public Key"),
+        )
+
+    def test_a_ticket_logs_the_shared_account_in_for_underground2(self) -> None:
+        later = int(time.time()) + 600
+        reply = self._login(make_ticket("user-11", "Bay_Driver", later))
+        self.assertTrue(reply.accepted, reply.reason)
+        account = self.credentials.resolve_account("x" + hashlib.sha256(b"user-11").hexdigest()[:24])
+        self.assertIsNotNone(account)
+        self.assertEqual(account.persona, "Bay_Driver")
+
+    def test_a_u2_encoded_ticket_is_decoded_and_accepted(self) -> None:
+        later = int(time.time()) + 600
+        token = make_password_token(make_ticket("user-12", "Bayview", later), "Public Key")
+        reply = self._login(token)
+        self.assertTrue(reply.accepted, reply.reason)
+
+    def test_underground2_tickets_are_off_without_a_secret(self) -> None:
+        service = create_u2_auth_service(
+            CredentialStore(),
+            IdentityStore(token_factory=lambda: "t."),
+            active_sessions=ClassicActiveSessionRegistry(),
+            ticket_secret=None,
+        )
+        reply = service.login(
+            {"NAME": "anything", "PASS": make_ticket("user-13", "Nobody", int(time.time()) + 600), "PSES": "Public Key"},
+            ClassicAuthContext(connection_id="c1", client_ip="203.0.113.9", mask="Public Key"),
+        )
+        self.assertFalse(reply.accepted)
+        self.assertEqual(reply.reason, "ticket_off")
