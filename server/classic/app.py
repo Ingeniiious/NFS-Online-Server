@@ -377,18 +377,27 @@ class ClassicOnlineApplication:
                 rooms.append(room)
         return rooms
 
+    @staticmethod
+    def _online_count(prelogin) -> int:
+        """ExA Cup: players signed in to this game's lobby now (a persona chosen), for the
+        player counts the launcher and the website show. A count only: no names leave here."""
+        with prelogin._connections_lock:
+            return sum(1 for peer in prelogin._connections.values() if peer.authenticated and peer.persona_selected)
+
     def _runtime_status_snapshot(self) -> dict[str, object]:
         return {
             "component": "classic",
             "games": {
                 "underground2": {
                     "enabled": bool(self.enable_u2),
+                    "online": self._online_count(self.u2.prelogin) if self.enable_u2 else 0,
                     "rooms": (
                         self._u2_live_room_snapshot()
                     ),
                 },
                 "most_wanted": {
                     "enabled": bool(self.enable_mw),
+                    "online": self._online_count(self.mw.prelogin) if self.enable_mw else 0,
                     "rooms": (
                         self.mw.sessions.status_snapshot() if self.enable_mw else []
                     ),
